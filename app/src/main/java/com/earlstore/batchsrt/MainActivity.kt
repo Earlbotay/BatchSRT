@@ -1,18 +1,18 @@
-package com.earlstore.subforge
+package com.earlstore.batchsrt
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import com.earlstore.subforge.ui.navigation.AppNavigation
-import com.earlstore.subforge.ui.theme.SubForgeTheme
+import com.earlstore.batchsrt.ui.navigation.AppNavigation
+import com.earlstore.batchsrt.ui.theme.BatchSRTTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            SubForgeTheme {
+            BatchSRTTheme {
                 AppNavigation()
             }
         }

@@ -1,1 +1,1 @@
-# SubForge proguard rules
+# BatchSRT ProGuard
