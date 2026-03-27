@@ -39,11 +39,11 @@ jobs:
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: BatchSRT-debug
+          name: SubForge-debug
           path: app/build/outputs/apk/debug/*.apk
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: BatchSRT-release
+          name: SubForge-release
           path: app/build/outputs/apk/release/*.apk
