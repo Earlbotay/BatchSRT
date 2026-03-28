@@ -1,6 +1,7 @@
 # 🤖 My AI Server
 
-AI chatbot tanpa sekatan, hosted percuma di GitHub Actions.
+AI ch
+atbot tanpa sekatan, hosted percuma di GitHub Actions.
 
 ## Features
 - ✅ Uncensored AI (Dolphin Mistral 7B)
