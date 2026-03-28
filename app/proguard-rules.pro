@@ -1,0 +1,8 @@
+-keep class com.autopilot.ai.data.model.** { *; }
+-keep class com.autopilot.ai.data.db.** { *; }
+-keepattributes Signature
+-keepattributes *Annotation*
+-dontwarn okhttp3.**
+-dontwarn retrofit2.**
+-keep class retrofit2.** { *; }
+-keep class com.google.gson.** { *; }

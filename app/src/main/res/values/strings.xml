@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoPilot AI</string>
+    <string name="accessibility_description">AutoPilot AI needs accessibility access to control your phone screen, take screenshots, and perform automated tasks on your behalf.</string>
+    <string name="notification_channel_name">AutoPilot AI Service</string>
+    <string name="notification_channel_description">Shows when AutoPilot AI is running tasks</string>
+</resources>
