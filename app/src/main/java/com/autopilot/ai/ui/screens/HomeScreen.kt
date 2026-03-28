@@ -1,5 +1,6 @@
 package com.autopilot.ai.ui.screens
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
@@ -43,11 +44,13 @@ fun HomeScreen(viewModel: MainViewModel) {
                 }
             }
         }
-    ) { padding ->
-        when (selectedIndex) {
-            0 -> ChatScreen(viewModel = viewModel)
-            1 -> ApiKeyScreen(viewModel = viewModel)
-            2 -> SettingsScreen(viewModel = viewModel)
+    ) { innerPadding ->
+        Box(modifier = Modifier.padding(innerPadding)) {
+            when (selectedIndex) {
+                0 -> ChatScreen(viewModel = viewModel)
+                1 -> ApiKeyScreen(viewModel = viewModel)
+                2 -> SettingsScreen(viewModel = viewModel)
+            }
         }
     }
 }
