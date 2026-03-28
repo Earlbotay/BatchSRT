@@ -1,0 +1,189 @@
+name: "\U0001F916 AI Server"
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "status.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: ai-server
+  cancel-in-progress: true
+
+jobs:
+  serve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      # ==========================================
+      # 1. CHECKOUT
+      # ==========================================
+      - uses: actions/checkout@v4
+
+      # ==========================================
+      # 2. CACHE MODEL
+      # ==========================================
+      - name: Cache model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: model.gguf
+          key: ai-model-v1
+
+      # ==========================================
+      # 3. BUILD LLAMA.CPP
+      # ==========================================
+      - name: Build llama.cpp
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake > /dev/null
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp
+          cd llama.cpp
+          cmake -B build -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
+          cmake --build build --config Release -t llama-server -j$(nproc) > /dev/null 2>&1
+          echo "✅ llama.cpp ready"
+
+      # ==========================================
+      # 4. DOWNLOAD MODEL
+      # ==========================================
+      - name: Download model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          echo "⬇️ Downloading model (~4.4GB)..."
+
+          # ╔══════════════════════════════════════════╗
+          # ║  TUKAR MODEL DI SINI                     ║
+          # ║  Uncomment SATU sahaja                   ║
+          # ╚══════════════════════════════════════════╝
+
+          # DEFAULT: Dolphin Mistral 7B (UNCENSORED, 4.4GB, bagus)
+          curl -L --progress-bar -o model.gguf \
+            "https://huggingface.co/TheBloke/dolphin-2.6-mistral-7b-GGUF/resolve/main/dolphin-2.6-mistral-7b.Q4_K_M.gguf"
+
+          # LAJU: Dolphin Phi-2 2.7B (UNCENSORED, 1.6GB, pantas)
+          # curl -L --progress-bar -o model.gguf \
+          #   "https://huggingface.co/TheBloke/dolphin-2_6-phi-2-GGUF/resolve/main/dolphin-2_6-phi-2.Q4_K_M.gguf"
+
+          # REASONING: DeepSeek R1 Distill 7B (4.5GB)
+          # curl -L --progress-bar -o model.gguf \
+          #   "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"
+
+          ls -lh model.gguf
+          echo "✅ Model ready"
+
+      # ==========================================
+      # 5. START AI SERVER
+      # ==========================================
+      - name: Start AI server
+        run: |
+          ./llama.cpp/build/bin/llama-server \
+            -m model.gguf \
+            --host 0.0.0.0 \
+            --port 8080 \
+            -t 4 \
+            -c 2048 \
+            --log-disable \
+            &
+
+          echo "⏳ Waiting for server..."
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:8080/health 2>/dev/null | grep -q "ok"; then
+              echo "✅ AI Server is up!"
+              break
+            fi
+            sleep 2
+          done
+
+      # ==========================================
+      # 6. CLOUDFLARE TUNNEL (URL TETAP!)
+      # ==========================================
+      - name: Start Cloudflare Tunnel
+        env:
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          curl -sSL -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+
+          if [ -n "$TUNNEL_TOKEN" ]; then
+            # ✅ NAMED TUNNEL — URL tetap!
+            echo "🔗 Starting named tunnel (fixed URL)..."
+            ./cloudflared tunnel run --token "$TUNNEL_TOKEN" &
+            sleep 5
+            echo "✅ Named tunnel active! URL tetap seperti di Cloudflare dashboard."
+          else
+            # 🔄 QUICK TUNNEL — URL random (fallback)
+            echo "⚠️ No CLOUDFLARE_TUNNEL_TOKEN found. Using random URL..."
+            ./cloudflared tunnel --url http://localhost:8080 2>&1 | tee /tmp/tunnel.log &
+
+            TUNNEL_URL=""
+            for i in $(seq 1 30); do
+              TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log 2>/dev/null | head -1 || true)
+              if [ -n "$TUNNEL_URL" ]; then break; fi
+              sleep 2
+            done
+
+            echo "============================================"
+            echo "🌐 AI SERVER: $TUNNEL_URL"
+            echo "============================================"
+            echo "$TUNNEL_URL" > status.txt
+          fi
+
+      # ==========================================
+      # 7. UPDATE STATUS
+      # ==========================================
+      - name: Update status
+        run: |
+          echo "🟢 ONLINE sejak $(date -u '+%Y-%m-%d %H:%M UTC')" > status.txt
+          git config user.name "AI Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git pull origin main --rebase || true
+          git add status.txt
+          git diff --cached --quiet || git commit -m "[skip ci] 🟢 Server online $(date -u '+%H:%M UTC')"
+          git push || true
+
+      # ==========================================
+      # 8. KEEP ALIVE 4.5 JAM
+      # ==========================================
+      - name: "\u23F3 Keep alive (4.5 hours)"
+        run: |
+          echo "🤖 Server running!"
+          echo "⏰ Auto-restart in ~4.5 hours"
+          echo "📊 Started: $(date)"
+
+          END_TIME=$((SECONDS + 16200))
+          while [ $SECONDS -lt $END_TIME ]; do
+            sleep 300
+            if curl -s http://localhost:8080/health 2>/dev/null | grep -q "ok"; then
+              echo "💓 $(date '+%H:%M') — OK"
+            else
+              echo "⚠️ $(date '+%H:%M') — Server down, restarting..."
+              ./llama.cpp/build/bin/llama-server \
+                -m model.gguf --host 0.0.0.0 --port 8080 \
+                -t 4 -c 2048 --log-disable &
+              sleep 15
+            fi
+          done
+
+      # ==========================================
+      # 9. AUTO-RESTART
+      # ==========================================
+      - name: "\U0001F504 Auto-restart"
+        if: always()
+        run: |
+          echo "🔴 RESTARTING $(date -u '+%H:%M UTC')" > status.txt
+          git add status.txt 2>/dev/null
+          git commit -m "[skip ci] 🔄 Restarting" 2>/dev/null
+          git push 2>/dev/null || true
+
+          curl -sS -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ai-server.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo "✅ Restart triggered!"

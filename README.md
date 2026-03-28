@@ -1,43 +1,88 @@
-# 📋 BatchSRT
+# 🤖 My AI Server
 
-**Batch process multiple video/audio files and generate subtitle files automatically using AI.**
+AI chatbot tanpa sekatan, hosted percuma di GitHub Actions.
 
-By **Earl Store** 🏪
+## Features
+- ✅ Uncensored AI (Dolphin Mistral 7B)
+- ✅ Web chat UI + OpenAI-compatible API
+- ✅ Auto-restart setiap 4.5 jam
+- ✅ Percuma selamanya (public repo)
+- ✅ Fixed URL via Cloudflare Tunnel
 
-## ✨ Features
+## Quick Start
 
-- 📂 **Batch Processing** — Select & process multiple files at once
-- 🤖 **AI Speech Recognition** — Automatic subtitle generation
-- 🌐 **Translation** — Translate subtitles to 20 languages (ML Kit offline)
-- 📝 **Multiple Formats** — Export as .srt, .vtt, or both
-- 📊 **Progress Tracking** — Real-time progress for each file
-- 🔔 **Foreground Service** — Processing continues in background
-- 🎯 **Target SDK 35** — Built for Android 15
+1. Fork/clone repo ini
+2. Setup Cloudflare Tunnel (lihat bawah)
+3. Push — AI server auto-start!
 
-## 🌍 Supported Languages
+## Setup Cloudflare Tunnel (URL Tetap)
 
-Bahasa Melayu, English, 中文, 日本語, 한국어, हिन्दी, العربية, ไทย, Tiếng Việt, Bahasa Indonesia, Filipino, Français, Deutsch, Español, Português, Русский, Italiano, Nederlands, Türkçe, Polski
+### Langkah 1: Cloudflare Zero Trust Dashboard
 
-## 🛠️ Tech Stack
+1. Pergi ke [one.dash.cloudflare.com](https://one.dash.cloudflare.com)
+2. Klik **Networks** → **Tunnels**
+3. Klik **Create a tunnel**
+4. Pilih **Cloudflared**
+5. Nama tunnel: `ai-server`
+6. **Copy token** yang ditunjukkan — simpan dulu
 
-- Kotlin 2.0 + Jetpack Compose
-- Material 3 Design
-- Android SpeechRecognizer API
-- Google ML Kit Translation (Offline)
-- Foreground Service + StateFlow
-- GitHub Actions CI/CD
+### Langkah 2: Setup Public Hostname
 
-## 📱 Build
+Masih di halaman tunnel setup:
+
+1. Klik **Public Hostnames** → **Add a public hostname**
+2. Isi:
+   - **Subdomain**: `ai` (atau apa-apa)
+   - **Domain**: pilih domain kamu
+   - **Service Type**: `HTTP`
+   - **URL**: `localhost:8080`
+3. Klik **Save**
+
+URL tetap kamu: `https://ai.domainku.com` 🎉
+
+### Langkah 3: Tambah Token ke GitHub
+
+1. Pergi ke repo GitHub → **Settings** → **Secrets and variables** → **Actions**
+2. Klik **New repository secret**
+3. Name: `CLOUDFLARE_TUNNEL_TOKEN`
+4. Value: paste token dari Langkah 1
+5. Klik **Add secret**
+
+### Langkah 4: Push!
 
 ```bash
-./gradlew assembleDebug
+git add .
+git commit -m "🚀 Launch AI server"
+git push
 ```
 
-Or push to GitHub and let GitHub Actions build automatically!
+Tunggu ~5-10 minit (pertama kali). Selepas itu, buka URL kamu! 🎉
 
-## 📄 License
+## Tukar Model
 
-MIT License — Free to use, modify, and distribute.
+Edit `.github/workflows/ai-server.yml` — bahagian "Download model".
+Uncomment model yang kamu nak:
 
----
-Made with ❤️ by Earl Store
+| Model | Saiz | Speed | Uncensored |
+|-------|------|-------|------------|
+| Dolphin Mistral 7B | 4.4GB | ~5 tok/s | ✅ Ya |
+| Dolphin Phi-2 2.7B | 1.6GB | ~18 tok/s | ✅ Ya |
+| DeepSeek R1 7B | 4.5GB | ~5 tok/s | ⚠️ Sikit |
+
+## API Usage
+
+```bash
+curl https://ai.domainku.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "temperature": 0.7
+  }'
+```
+
+Compatible dengan mana-mana app yang support OpenAI API.
+
+## Stop Server
+
+- **Actions** → cancel running workflow, atau
+- **Actions** → **🤖 AI Server** → **⋯** → **Disable workflow**

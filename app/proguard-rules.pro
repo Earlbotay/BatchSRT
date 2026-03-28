@@ -1,1 +1,0 @@
-# BatchSRT ProGuard
