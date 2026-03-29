@@ -48,5 +48,10 @@
             android:exported="false"
             android:foregroundServiceType="specialUse" />
 
+        <service
+            android:name=".service.FloatingOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
     </application>
 </manifest>

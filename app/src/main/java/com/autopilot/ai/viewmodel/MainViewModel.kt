@@ -5,7 +5,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.autopilot.ai.App
 import com.autopilot.ai.data.model.ConversationMessage
-import com.autopilot.ai.service.AgentOrchestrator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,7 +13,7 @@ import kotlinx.coroutines.launch
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as App
     private val repository = app.repository
-    val orchestrator = AgentOrchestrator(application, repository)
+    val orchestrator = app.orchestrator
 
     val activeKeys = repository.activeKeys
     val isolatedKeys = repository.isolatedKeys

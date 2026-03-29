@@ -44,8 +44,8 @@ fun HomeScreen(viewModel: MainViewModel) {
                 }
             }
         }
-    ) { innerPadding ->
-        Box(modifier = Modifier.padding(innerPadding)) {
+    ) { padding ->
+        Box(modifier = Modifier.padding(padding)) {
             when (selectedIndex) {
                 0 -> ChatScreen(viewModel = viewModel)
                 1 -> ApiKeyScreen(viewModel = viewModel)
