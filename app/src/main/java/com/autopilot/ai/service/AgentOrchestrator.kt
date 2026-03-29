@@ -60,6 +60,10 @@ class AgentOrchestrator(
         return "data:image/png;base64,$b64"
     }
 
+    /* ═══════════════════════════════════════════════════════
+     *  MAIN ENTRY POINT
+     * ═══════════════════════════════════════════════════════ */
+
     suspend fun processCommand(userMessage: String) {
         if (_isRunning.value) return
         _isRunning.value = true
@@ -69,6 +73,18 @@ class AgentOrchestrator(
         addMessage(ConversationMessage(role = "user", content = userMessage))
 
         try {
+            /* ── 1. Direct "open app" command — no screenshot needed ── */
+            val appName = extractOpenAppCommand(userMessage)
+            if (appName != null) {
+                addMessage(ConversationMessage(role = "assistant", content = "Opening $appName..."))
+                executeAction("OPEN $appName")
+                delay(1000)
+                addMessage(ConversationMessage(role = "assistant", content = "✅ $appName opened."))
+                _isRunning.value = false
+                return
+            }
+
+            /* ── 2. All other tasks: screenshot FIRST → analyze ── */
             val mainKey = getNextKey()
             if (mainKey == null) {
                 addMessage(ConversationMessage(role = "assistant", content = "No API keys available. Please add API keys in Settings."))
@@ -80,31 +96,36 @@ class AgentOrchestrator(
             val screenshot = service?.takeScreenshotAsync()
             val screenText = service?.getScreenContent() ?: "Accessibility service not available"
 
-            val analysisMessages = buildAnalysisPrompt(userMessage, screenText, screenshot)
-            val analysisResponse = callApi(mainKey, analysisMessages)
+            addMessage(ConversationMessage(role = "system", content = "📸 Screenshot captured, analyzing..."))
 
-            if (analysisResponse == null) {
+            /* ── 3. Main Agent: analyze & plan ── */
+            val planMessages = buildMainAgentPrompt(userMessage, screenText, screenshot)
+            val planResponse = callApi(mainKey, planMessages)
+
+            if (planResponse == null) {
                 addMessage(ConversationMessage(role = "assistant", content = "Failed to get response from AI. Check your API keys."))
                 _isRunning.value = false
                 return
             }
 
-            val responseText = analysisResponse.getOutputText()
+            val responseText = planResponse.getOutputText()
 
+            /* ── 4. Main Agent decides: direct actions or subtasks ── */
             if (responseText.contains("[SUBTASKS]")) {
                 val tasks = parseSubTasks(responseText)
                 if (tasks.isNotEmpty()) {
                     _currentTasks.value = tasks
                     addMessage(ConversationMessage(
                         role = "assistant",
-                        content = "Breaking this into ${tasks.size} sub-tasks..."
+                        content = "🧠 Main Agent: Breaking into ${tasks.size} sub-tasks...\n" +
+                            tasks.joinToString("\n") { "${it.id}. ${it.description}" }
                     ))
-                    executeSubTasks(tasks, userMessage)
+                    executeSubAgentsSequentially(tasks, userMessage)
                 } else {
-                    executeDirectly(mainKey, userMessage, responseText)
+                    executeDirectActions(mainKey, userMessage, responseText)
                 }
             } else {
-                executeDirectly(mainKey, userMessage, responseText)
+                executeDirectActions(mainKey, userMessage, responseText)
             }
         } catch (e: CancellationException) {
             addMessage(ConversationMessage(role = "assistant", content = "Task cancelled."))
@@ -117,7 +138,37 @@ class AgentOrchestrator(
         }
     }
 
-    private suspend fun executeDirectly(key: ApiKeyEntity, userMessage: String, initialResponse: String) {
+    /* ═══════════════════════════════════════════════════════
+     *  OPEN APP DETECTION — direct action, no AI needed
+     * ═══════════════════════════════════════════════════════ */
+
+    private fun extractOpenAppCommand(message: String): String? {
+        val lower = message.lowercase().trim()
+        val pattern = Regex(
+            "^(?:open|buka|bukak|launch|start|run|jalankan)\\s+(.+)",
+            RegexOption.IGNORE_CASE
+        )
+        val match = pattern.find(lower) ?: return null
+        val appName = match.groupValues[1].trim()
+
+        // Only treat as "open app" if it's a simple app name, not a complex instruction
+        if (appName.contains(" and ") || appName.contains(" dan ") ||
+            appName.contains(" then ") || appName.contains(" pastu ") ||
+            appName.contains(" lepas ") || appName.contains(",") ||
+            appName.split(" ").size > 4
+        ) return null
+
+        // Return original-case app name from the original message
+        return message.trim().substringAfter(" ").trim()
+    }
+
+    /* ═══════════════════════════════════════════════════════
+     *  DIRECT ACTION EXECUTION (simple tasks)
+     * ═══════════════════════════════════════════════════════ */
+
+    private suspend fun executeDirectActions(
+        key: ApiKeyEntity, userMessage: String, initialResponse: String
+    ) {
         addMessage(ConversationMessage(role = "assistant", content = initialResponse))
 
         val actions = parseActions(initialResponse)
@@ -128,7 +179,7 @@ class AgentOrchestrator(
 
             if (needsScreenCheck(action)) {
                 delay(800)
-                val shouldContinue = checkScreenAndContinue(key, userMessage)
+                val shouldContinue = verifyAndContinue(key, userMessage)
                 if (!shouldContinue) break
             }
         }
@@ -136,36 +187,39 @@ class AgentOrchestrator(
 
     private fun needsScreenCheck(action: String): Boolean {
         val cmd = action.trim().split(" ", limit = 2).firstOrNull()?.uppercase() ?: ""
-        return cmd in listOf("TAP", "CLICK", "SWIPE", "OPEN", "BACK", "HOME", "TYPE")
+        return cmd in listOf("TAP", "CLICK", "SWIPE", "OPEN", "BACK", "HOME", "TYPE", "LONGPRESS")
     }
 
-    private suspend fun checkScreenAndContinue(key: ApiKeyEntity, originalCommand: String): Boolean {
+    /* ═══════════════════════════════════════════════════════
+     *  VERIFY & CONTINUE LOOP (screenshot after each action)
+     * ═══════════════════════════════════════════════════════ */
+
+    private suspend fun verifyAndContinue(
+        key: ApiKeyEntity, originalCommand: String
+    ): Boolean {
         val service = AutoPilotAccessibilityService.instance ?: return false
         val screenshot = service.takeScreenshotAsync()
         val screenText = service.getScreenContent()
 
         val messages = mutableListOf<ChatMessage>()
-        messages.add(ChatMessage(role = "system", content = SYSTEM_PROMPT))
+        messages.add(ChatMessage(role = "system", content = MAIN_AGENT_PROMPT))
+
+        val promptText = "I just performed an action for: '$originalCommand'\n\n" +
+            "Screen text: $screenText\n\n" +
+            "Look at the screenshot. Is the task complete?\n" +
+            "If more actions needed: respond with [ACTION:...] tags.\n" +
+            "If done: respond with [DONE] and a brief summary."
 
         if (screenshot != null) {
-            val dataUrl = bitmapToDataUrl(screenshot)
             messages.add(ChatMessage(
                 role = "user",
                 content = listOf(
-                    ImageContentBlock(base64 = dataUrl),
-                    TextContentBlock(text = "I just performed an action for: '$originalCommand'\n\n" +
-                        "Screen text: $screenText\n\n" +
-                        "Look at the screenshot. Is the task complete?\n" +
-                        "If more actions needed: respond with [ACTION:...] tags.\n" +
-                        "If done: respond with [DONE] and a brief summary.")
+                    ImageContentBlock(base64 = bitmapToDataUrl(screenshot)),
+                    TextContentBlock(text = promptText)
                 )
             ))
         } else {
-            messages.add(ChatMessage(
-                role = "user",
-                content = "Action done for: '$originalCommand'\nScreen: $screenText\n" +
-                    "Complete? If not, use [ACTION:...]. If done, say [DONE]."
-            ))
+            messages.add(ChatMessage(role = "user", content = promptText))
         }
 
         val response = callApi(key, messages) ?: return false
@@ -190,81 +244,185 @@ class AgentOrchestrator(
         return true
     }
 
-    private suspend fun executeSubTasks(tasks: List<AgentTask>, originalCommand: String) {
+    /* ═══════════════════════════════════════════════════════
+     *  SUBAGENT SEQUENTIAL EXECUTION
+     *  Main Agent planned the tasks → SubAgents execute one-by-one
+     * ═══════════════════════════════════════════════════════ */
+
+    private suspend fun executeSubAgentsSequentially(
+        tasks: List<AgentTask>, originalCommand: String
+    ) {
         for (task in tasks) {
             if (shouldStop || !coroutineContext.isActive) {
                 task.status = TaskStatus.STOPPED
                 _currentTasks.value = tasks.toList()
-                addMessage(ConversationMessage(role = "assistant", content = "Stopped at task ${task.id}: ${task.description}"))
+                addMessage(ConversationMessage(
+                    role = "assistant",
+                    content = "⏹ Stopped at task ${task.id}: ${task.description}"
+                ))
                 break
             }
 
             task.status = TaskStatus.RUNNING
             _currentTasks.value = tasks.toList()
 
-            val subKey = getNextKey()
-            if (subKey == null) {
-                addMessage(ConversationMessage(role = "assistant", content = "No API keys for sub-task ${task.id}.", isSubAgent = true, subAgentId = task.id))
-                task.status = TaskStatus.FAILED
-                _currentTasks.value = tasks.toList()
-                continue
-            }
-
-            addMessage(ConversationMessage(role = "assistant", content = "SubAgent #${task.id}: ${task.description}", isSubAgent = true, subAgentId = task.id))
+            addMessage(ConversationMessage(
+                role = "assistant",
+                content = "🤖 SubAgent #${task.id} starting: ${task.description}",
+                isSubAgent = true, subAgentId = task.id
+            ))
 
             try {
-                val service = AutoPilotAccessibilityService.instance
-                val screenshot = service?.takeScreenshotAsync()
-                val screenText = service?.getScreenContent() ?: "No accessibility"
-
-                val subMessages = buildSubAgentPrompt(task.description, originalCommand, screenText, screenshot)
-                val response = callApi(subKey, subMessages)
-
-                if (response != null) {
-                    val output = response.getOutputText()
-                    task.result = output
-                    task.status = TaskStatus.COMPLETED
-
-                    addMessage(ConversationMessage(role = "assistant", content = "SubAgent #${task.id} done: ${output.take(200)}", isSubAgent = true, subAgentId = task.id))
-
-                    val actions = parseActions(output)
-                    for (action in actions) {
-                        if (shouldStop) break
-                        executeAction(action)
-                        delay(300)
-                    }
-                    if (actions.isNotEmpty()) delay(800)
-                } else {
-                    task.status = TaskStatus.FAILED
-                    addMessage(ConversationMessage(role = "assistant", content = "SubAgent #${task.id} failed.", isSubAgent = true, subAgentId = task.id))
-                }
+                executeSubAgentLoop(task, originalCommand)
             } catch (e: Exception) {
                 task.status = TaskStatus.FAILED
                 task.result = "Error: ${e.message}"
                 Log.e(TAG, "SubAgent ${task.id} error", e)
+                addMessage(ConversationMessage(
+                    role = "assistant",
+                    content = "❌ SubAgent #${task.id} failed: ${e.message}",
+                    isSubAgent = true, subAgentId = task.id
+                ))
             }
+
             _currentTasks.value = tasks.toList()
         }
 
         val completed = tasks.count { it.status == TaskStatus.COMPLETED }
-        addMessage(ConversationMessage(role = "assistant", content = "Done. $completed/${tasks.size} sub-tasks completed."))
+        addMessage(ConversationMessage(
+            role = "assistant",
+            content = "✅ Done. $completed/${tasks.size} sub-tasks completed."
+        ))
     }
 
-    private suspend fun callApi(key: ApiKeyEntity, messages: List<ChatMessage>): ChatResponse? {
+    /* ═══════════════════════════════════════════════════════
+     *  SUBAGENT LOOP: screenshot → analyze → execute → repeat
+     *  Each SubAgent independently observes the screen before every cycle
+     * ═══════════════════════════════════════════════════════ */
+
+    private suspend fun executeSubAgentLoop(task: AgentTask, originalCommand: String) {
+        val maxIterations = 15
+        var iteration = 0
+
+        while (iteration < maxIterations && !shouldStop && coroutineContext.isActive) {
+            iteration++
+
+            // 1. SubAgent screenshots current screen state FIRST
+            val service = AutoPilotAccessibilityService.instance
+            if (service == null) {
+                task.status = TaskStatus.FAILED
+                task.result = "Accessibility service not available"
+                break
+            }
+
+            val screenshot = service.takeScreenshotAsync()
+            val screenText = service.getScreenContent()
+
+            // 2. Get API key for this SubAgent call
+            val subKey = getNextKey()
+            if (subKey == null) {
+                addMessage(ConversationMessage(
+                    role = "assistant",
+                    content = "⚠ SubAgent #${task.id}: No API keys available",
+                    isSubAgent = true, subAgentId = task.id
+                ))
+                task.status = TaskStatus.FAILED
+                break
+            }
+
+            // 3. SubAgent AI analyzes screenshot and decides actions
+            val subMessages = buildSubAgentPrompt(
+                task.description, originalCommand, screenText, screenshot, iteration
+            )
+            val response = callApi(subKey, subMessages)
+
+            if (response == null) {
+                task.status = TaskStatus.FAILED
+                task.result = "API call failed at iteration $iteration"
+                break
+            }
+
+            val output = response.getOutputText()
+
+            // 4. Check if SubAgent says task is done
+            if (output.contains("[DONE]")) {
+                val summary = output.replace(Regex("\\[DONE]"), "").trim()
+                task.status = TaskStatus.COMPLETED
+                task.result = summary
+                addMessage(ConversationMessage(
+                    role = "assistant",
+                    content = "✅ SubAgent #${task.id} completed: ${summary.take(200)}",
+                    isSubAgent = true, subAgentId = task.id
+                ))
+                break
+            }
+
+            // 5. Execute actions returned by SubAgent
+            val actions = parseActions(output)
+            if (actions.isEmpty()) {
+                // No actions and no [DONE] — SubAgent returned text only
+                addMessage(ConversationMessage(
+                    role = "assistant",
+                    content = "🤖 SubAgent #${task.id}: ${output.take(200)}",
+                    isSubAgent = true, subAgentId = task.id
+                ))
+                task.status = TaskStatus.COMPLETED
+                task.result = output
+                break
+            }
+
+            for (action in actions) {
+                if (shouldStop) break
+                addMessage(ConversationMessage(
+                    role = "system",
+                    content = "SubAgent #${task.id} → [ACTION:$action]"
+                ))
+                executeAction(action)
+                delay(300)
+            }
+
+            // 6. Wait for screen to update before next screenshot cycle
+            delay(800)
+        }
+
+        // Max iterations reached
+        if (iteration >= maxIterations && task.status != TaskStatus.COMPLETED) {
+            task.status = TaskStatus.COMPLETED
+            task.result = "Completed after $maxIterations iterations"
+            addMessage(ConversationMessage(
+                role = "assistant",
+                content = "🤖 SubAgent #${task.id}: Max iterations reached, moving on.",
+                isSubAgent = true, subAgentId = task.id
+            ))
+        }
+    }
+
+    /* ═══════════════════════════════════════════════════════
+     *  API CALL WITH KEY ROTATION
+     * ═══════════════════════════════════════════════════════ */
+
+    private suspend fun callApi(
+        key: ApiKeyEntity, messages: List<ChatMessage>
+    ): ChatResponse? {
         return withContext(Dispatchers.IO) {
             var currentKey = key
             var attempts = 0
 
             while (attempts < 5) {
                 try {
-                    val request = ChatRequest(messages = messages, params = ModelParams(maxTokens = 4096, temperature = 0.7))
+                    val request = ChatRequest(
+                        messages = messages,
+                        params = ModelParams(maxTokens = 4096, temperature = 0.7)
+                    )
                     val response = api.chat("Key ${currentKey.keyValue}", request)
 
                     if (response.error != null) {
                         val err = response.error.lowercase()
-                        if (err.contains("credit") || err.contains("quota") || err.contains("limit") ||
-                            err.contains("unauthorized") || err.contains("invalid") ||
-                            err.contains("402") || err.contains("429")) {
+                        if (err.contains("credit") || err.contains("quota") ||
+                            err.contains("limit") || err.contains("unauthorized") ||
+                            err.contains("invalid") || err.contains("402") ||
+                            err.contains("429")
+                        ) {
                             repository.isolateKey(currentKey)
                             val next = getNextKey() ?: return@withContext null
                             currentKey = next
@@ -300,6 +458,10 @@ class AgentOrchestrator(
         if (key != null) usedKeyIds.add(key.id)
         return key
     }
+
+    /* ═══════════════════════════════════════════════════════
+     *  ACTION EXECUTION
+     * ═══════════════════════════════════════════════════════ */
 
     private suspend fun executeAction(action: String) {
         val service = AutoPilotAccessibilityService.instance ?: return
@@ -341,7 +503,11 @@ class AgentOrchestrator(
                 "SCREENSHOT" -> {
                     val bmp = service.takeScreenshotAsync()
                     if (bmp != null) {
-                        addMessage(ConversationMessage(role = "system", content = "[Screenshot captured]", imageBase64 = bitmapToDataUrl(bmp)))
+                        addMessage(ConversationMessage(
+                            role = "system",
+                            content = "[Screenshot captured]",
+                            imageBase64 = bitmapToDataUrl(bmp)
+                        ))
                     }
                 }
                 "WAIT" -> delay(args.toLongOrNull() ?: 1000L)
@@ -350,6 +516,10 @@ class AgentOrchestrator(
             Log.e(TAG, "Action error: $action", e)
         }
     }
+
+    /* ═══════════════════════════════════════════════════════
+     *  PARSING HELPERS
+     * ═══════════════════════════════════════════════════════ */
 
     private fun parseActions(response: String): List<String> {
         val actions = mutableListOf<String>()
@@ -364,10 +534,17 @@ class AgentOrchestrator(
         return section.lines()
             .filter { it.trim().isNotEmpty() }
             .mapIndexed { i, line ->
-                AgentTask(id = i + 1, description = line.replace(Regex("^\\d+\\.?\\s*"), "").trim())
+                AgentTask(
+                    id = i + 1,
+                    description = line.replace(Regex("^\\d+\\.?\\s*"), "").trim()
+                )
             }
             .filter { it.description.isNotEmpty() }
     }
+
+    /* ═══════════════════════════════════════════════════════
+     *  MESSAGES
+     * ═══════════════════════════════════════════════════════ */
 
     private fun addMessage(msg: ConversationMessage) {
         _messages.value = _messages.value + msg
@@ -378,47 +555,109 @@ class AgentOrchestrator(
         _currentTasks.value = emptyList()
     }
 
-    private fun buildAnalysisPrompt(userCommand: String, screenText: String, screenshot: Bitmap?): List<ChatMessage> {
+    /* ═══════════════════════════════════════════════════════
+     *  PROMPTS — Main Agent & SubAgent
+     * ═══════════════════════════════════════════════════════ */
+
+    private fun buildMainAgentPrompt(
+        userCommand: String, screenText: String, screenshot: Bitmap?
+    ): List<ChatMessage> {
         val msgs = mutableListOf<ChatMessage>()
-        msgs.add(ChatMessage(role = "system", content = SYSTEM_PROMPT))
+        msgs.add(ChatMessage(role = "system", content = MAIN_AGENT_PROMPT))
+
+        val text = "Current screen text:\n$screenText\n\n" +
+            "User command: $userCommand\n\n" +
+            "Analyze the screen and the user's request.\n" +
+            "- If simple (1-3 actions): respond with [ACTION:...] tags directly.\n" +
+            "- If complex (multiple steps): plan with [SUBTASKS]\\n1. step\\n2. step\\n[/SUBTASKS].\n" +
+            "Each subtask should be a clear, achievable goal for a SubAgent."
 
         if (screenshot != null) {
             msgs.add(ChatMessage(role = "user", content = listOf(
                 ImageContentBlock(base64 = bitmapToDataUrl(screenshot)),
-                TextContentBlock(text = "Screen text: $screenText\n\nUser: $userCommand\n\n" +
-                    "Analyze: simple? Use [ACTION:...]. Complex? Use [SUBTASKS]...[/SUBTASKS].\n" +
-                    "Actions: TAP x,y | LONGPRESS x,y | SWIPE x1,y1,x2,y2 | TYPE text | CLICK text | BACK | HOME | RECENTS | OPEN app | SEARCH query | SCRAPE url | SCREENSHOT | WAIT ms")
+                TextContentBlock(text = text)
             )))
         } else {
-            msgs.add(ChatMessage(role = "user", content = "Screen: $screenText\n\nUser: $userCommand\n\n" +
-                "Simple? [ACTION:...]. Complex? [SUBTASKS]...[/SUBTASKS].\n" +
-                "Actions: TAP x,y | SWIPE x1,y1,x2,y2 | TYPE text | CLICK text | BACK | HOME | RECENTS | OPEN app | SEARCH query | SCRAPE url | SCREENSHOT | WAIT ms"))
+            msgs.add(ChatMessage(role = "user", content = text))
         }
         return msgs
     }
 
-    private fun buildSubAgentPrompt(task: String, original: String, screenText: String, screenshot: Bitmap?): List<ChatMessage> {
+    private fun buildSubAgentPrompt(
+        task: String, originalCommand: String, screenText: String,
+        screenshot: Bitmap?, iteration: Int
+    ): List<ChatMessage> {
         val msgs = mutableListOf<ChatMessage>()
-        msgs.add(ChatMessage(role = "system", content = SYSTEM_PROMPT))
+        msgs.add(ChatMessage(role = "system", content = SUBAGENT_PROMPT))
+
+        val text = "Your assigned task: $task\n" +
+            "Original user request: $originalCommand\n" +
+            "Iteration: $iteration of $MAX_SUBAGENT_ITERATIONS\n\n" +
+            "Current screen text:\n$screenText\n\n" +
+            "Analyze the screenshot and screen text carefully.\n" +
+            "Determine the NEXT actions to perform for your task.\n" +
+            "Respond with [ACTION:...] tags (1-3 actions max per response).\n" +
+            "When your task is FULLY COMPLETE, respond with [DONE] and a brief summary."
 
         if (screenshot != null) {
             msgs.add(ChatMessage(role = "user", content = listOf(
                 ImageContentBlock(base64 = bitmapToDataUrl(screenshot)),
-                TextContentBlock(text = "SubAgent task: $task\nOriginal: $original\nScreen: $screenText\n\nRespond with [ACTION:...] tags.")
+                TextContentBlock(text = text)
             )))
         } else {
-            msgs.add(ChatMessage(role = "user", content = "SubAgent task: $task\nOriginal: $original\nScreen: $screenText\n\nRespond with [ACTION:...] tags."))
+            msgs.add(ChatMessage(role = "user", content = text))
         }
         return msgs
     }
 
     companion object {
         private const val TAG = "AgentOrchestrator"
-        private const val SYSTEM_PROMPT = "You are AutoPilot AI, a phone automation agent. You see screenshots and control the screen.\n\n" +
-            "Actions: [ACTION:TAP x,y] [ACTION:LONGPRESS x,y] [ACTION:SWIPE x1,y1,x2,y2] [ACTION:TYPE text] [ACTION:CLICK text] " +
-            "[ACTION:BACK] [ACTION:HOME] [ACTION:RECENTS] [ACTION:OPEN app] [ACTION:SEARCH query] " +
-            "[ACTION:SCRAPE url] [ACTION:SCREENSHOT] [ACTION:WAIT ms]\n\n" +
-            "Rules: Use CLICK over TAP when text visible. Use LONGPRESS for long-touch actions (e.g. copy-paste menus, drag). Use SCREENSHOT if unsure. " +
-            "Complex tasks: [SUBTASKS]\\n1. task\\n[/SUBTASKS]. Done: [DONE] + summary."
+        private const val MAX_SUBAGENT_ITERATIONS = 15
+
+        private const val MAIN_AGENT_PROMPT =
+            "You are AutoPilot AI Main Agent. You analyze the user's request and the current screen " +
+            "state to plan actions.\n\n" +
+            "Available actions:\n" +
+            "[ACTION:TAP x,y] - Tap at screen coordinates\n" +
+            "[ACTION:LONGPRESS x,y] - Long press (context menus, drag, copy-paste)\n" +
+            "[ACTION:SWIPE x1,y1,x2,y2] - Swipe/slide from one point to another\n" +
+            "[ACTION:TYPE text] - Type text into the currently focused field\n" +
+            "[ACTION:CLICK text] - Click an element by its visible text (preferred over TAP)\n" +
+            "[ACTION:BACK] - Press back button\n" +
+            "[ACTION:HOME] - Press home button\n" +
+            "[ACTION:RECENTS] - Open recent apps\n" +
+            "[ACTION:OPEN app] - Open an app by name\n" +
+            "[ACTION:SEARCH query] - Search the web\n" +
+            "[ACTION:SCRAPE url] - Scrape a webpage\n" +
+            "[ACTION:SCREENSHOT] - Take a screenshot for analysis\n" +
+            "[ACTION:WAIT ms] - Wait for specified milliseconds\n\n" +
+            "Rules:\n" +
+            "- Use CLICK over TAP when text is visible on screen\n" +
+            "- Use LONGPRESS for context menus, copy-paste, drag operations\n" +
+            "- Use SWIPE for scrolling, swiping between pages, pull down notifications\n" +
+            "- For complex multi-step tasks: break into subtasks with [SUBTASKS]\\n1. task\\n[/SUBTASKS]\n" +
+            "- Each subtask must be a clear single goal that a SubAgent can execute independently\n" +
+            "- For simple tasks (1-3 actions): use [ACTION:...] directly\n" +
+            "- When complete: [DONE] + brief summary"
+
+        private const val SUBAGENT_PROMPT =
+            "You are AutoPilot AI SubAgent. You execute ONE specific task by analyzing the current " +
+            "screen and performing actions.\n\n" +
+            "You are called in a LOOP. Each iteration:\n" +
+            "1. You receive a FRESH screenshot and screen text of the current state\n" +
+            "2. You analyze what you see on screen RIGHT NOW\n" +
+            "3. You respond with [ACTION:...] tags for the NEXT 1-3 actions\n" +
+            "4. Actions are executed, then you get a new screenshot in the next iteration\n\n" +
+            "Available actions:\n" +
+            "[ACTION:TAP x,y] | [ACTION:LONGPRESS x,y] | [ACTION:SWIPE x1,y1,x2,y2] | " +
+            "[ACTION:TYPE text] | [ACTION:CLICK text] | [ACTION:BACK] | [ACTION:HOME] | " +
+            "[ACTION:RECENTS] | [ACTION:OPEN app] | [ACTION:SEARCH query] | " +
+            "[ACTION:SCRAPE url] | [ACTION:SCREENSHOT] | [ACTION:WAIT ms]\n\n" +
+            "Rules:\n" +
+            "- ALWAYS look at the screenshot to determine exact coordinates\n" +
+            "- Use CLICK over TAP when text is visible\n" +
+            "- Only perform 1-3 actions per response — you'll get a new screenshot after\n" +
+            "- When your specific task is FULLY COMPLETE: respond with [DONE] and a summary\n" +
+            "- Do NOT say [DONE] until you can confirm the task succeeded from the screenshot"
     }
 }

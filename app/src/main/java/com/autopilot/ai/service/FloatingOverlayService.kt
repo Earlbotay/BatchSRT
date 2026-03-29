@@ -59,6 +59,23 @@ class FloatingOverlayService : Service() {
                 Intent(context, FloatingOverlayService::class.java)
             )
         }
+
+        /** Hide bubble + panel — called when AutoPilot app is in foreground. */
+        fun hide() {
+            instance?.let { svc ->
+                svc.bubbleView?.visibility = View.GONE
+                if (svc.isPanelShowing) svc.removePanel()
+            }
+        }
+
+        /** Show bubble — called when AutoPilot app goes to background. */
+        fun show() {
+            instance?.let { svc ->
+                if (!svc.isPanelShowing) {
+                    svc.bubbleView?.visibility = View.VISIBLE
+                }
+            }
+        }
     }
 
     private lateinit var windowManager: WindowManager
@@ -96,7 +113,13 @@ class FloatingOverlayService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
 
-        showBubble()
+        createBubble()
+
+        // If the app is currently in foreground, hide the bubble immediately
+        val app = application as? App
+        if (app?.isAppInForeground == true) {
+            bubbleView?.visibility = View.GONE
+        }
     }
 
     override fun onDestroy() {
@@ -133,7 +156,7 @@ class FloatingOverlayService : Service() {
 
     /* ════════════════════  BUBBLE  ════════════════════ */
 
-    private fun showBubble() {
+    private fun createBubble() {
         val size = dp(56)
 
         val bubble = FrameLayout(this).apply {
@@ -182,10 +205,7 @@ class FloatingOverlayService : Service() {
                     val dx = ev.rawX - tx; val dy = ev.rawY - ty
                     if (dx * dx + dy * dy > 100) drag = true
                     params.x = ix + dx.toInt(); params.y = iy + dy.toInt()
-                    try {
-                        windowManager.updateViewLayout(bubble, params)
-                    } catch (_: Exception) {
-                    }
+                    try { windowManager.updateViewLayout(bubble, params) } catch (_: Exception) {}
                     true
                 }
                 MotionEvent.ACTION_UP -> {
@@ -201,10 +221,7 @@ class FloatingOverlayService : Service() {
 
     private fun removeBubble() {
         bubbleView?.let {
-            try {
-                windowManager.removeView(it)
-            } catch (_: Exception) {
-            }
+            try { windowManager.removeView(it) } catch (_: Exception) {}
         }
         bubbleView = null
     }
@@ -418,7 +435,6 @@ class FloatingOverlayService : Service() {
         container: LinearLayout, scroll: ScrollView, messages: List<ConversationMessage>
     ) {
         if (messages.size < lastMessageCount) {
-            // Messages were cleared
             container.removeAllViews()
             lastMessageCount = 0
         }
@@ -496,10 +512,7 @@ class FloatingOverlayService : Service() {
         messagesContainer = null
         lastMessageCount = 0
         panelView?.let {
-            try {
-                windowManager.removeView(it)
-            } catch (_: Exception) {
-            }
+            try { windowManager.removeView(it) } catch (_: Exception) {}
         }
         panelView = null
         isPanelShowing = false
