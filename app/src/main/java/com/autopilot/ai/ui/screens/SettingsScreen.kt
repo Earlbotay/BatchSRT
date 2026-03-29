@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -47,7 +46,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.autopilot.ai.service.AutoPilotAccessibilityService
-import com.autopilot.ai.service.FloatingOverlayService
 import com.autopilot.ai.ui.theme.AgentGreen
 import com.autopilot.ai.viewmodel.MainViewModel
 
@@ -61,12 +59,10 @@ fun SettingsScreen(viewModel: MainViewModel) {
     /* refresh overlay permission when user comes back from system settings */
     val lifecycleOwner = LocalLifecycleOwner.current
     var canDrawOverlays by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
-    var isOverlayActive by remember { mutableStateOf(FloatingOverlayService.instance != null) }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 canDrawOverlays = Settings.canDrawOverlays(context)
-                isOverlayActive = FloatingOverlayService.instance != null
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -127,42 +123,34 @@ fun SettingsScreen(viewModel: MainViewModel) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // ── Floating Overlay & Automation ──
+        // ── Floating Bubble ──
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = if (isOverlayActive)
+                containerColor = if (canDrawOverlays)
                     AgentGreen.copy(alpha = 0.1f)
                 else
-                    MaterialTheme.colorScheme.surfaceVariant
+                    Color.Red.copy(alpha = 0.1f)
             )
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        Icons.Default.Layers,
+                        if (canDrawOverlays) Icons.Default.CheckCircle else Icons.Default.Warning,
                         contentDescription = null,
-                        tint = if (isOverlayActive) AgentGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (canDrawOverlays) AgentGreen else Color.Red,
                         modifier = Modifier.size(24.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Floating Overlay", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Floating Bubble", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "Shows a floating bubble on screen. Tap it to open a prompt from any app.",
-                    fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
 
                 if (!canDrawOverlays) {
-                    // Permission not granted
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Overlay permission required", fontSize = 13.sp, color = Color.Red)
-                    }
+                    Text(
+                        "Overlay permission is required so the floating bubble can appear over other apps.",
+                        fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(onClick = {
                         val intent = Intent(
@@ -171,48 +159,16 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         )
                         context.startActivity(intent)
                     }) {
-                        Text("Grant Overlay Permission")
+                        Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Grant Permission")
                     }
                 } else {
-                    // Permission granted — show start/stop
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = AgentGreen, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Overlay permission granted", fontSize = 13.sp, color = AgentGreen)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    if (isOverlayActive) {
-                        Button(
-                            onClick = {
-                                context.stopService(Intent(context, FloatingOverlayService::class.java))
-                                isOverlayActive = false
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
-                        ) {
-                            Text("Stop Floating Overlay")
-                        }
-                        Text(
-                            "🤖 Bubble is floating — tap it to prompt from any app",
-                            fontSize = 12.sp, color = AgentGreen,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    } else {
-                        Button(onClick = {
-                            context.startForegroundService(
-                                Intent(context, FloatingOverlayService::class.java)
-                            )
-                            isOverlayActive = true
-                        }) {
-                            Text("Start Floating Overlay")
-                        }
-                        Text(
-                            "Tap to activate the floating bubble",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
+                    Text(
+                        "Bubble appears automatically when you start chatting. " +
+                            "Tap the floating bubble from any app to continue your conversation with AI.",
+                        fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

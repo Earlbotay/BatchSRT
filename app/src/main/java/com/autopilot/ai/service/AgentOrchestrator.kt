@@ -313,6 +313,13 @@ class AgentOrchestrator(
                     val c = args.split(",").map { it.trim().toFloat() }
                     if (c.size == 2) service.performTap(c[0], c[1])
                 }
+                "LONGPRESS" -> {
+                    val c = args.split(",").map { it.trim().toFloat() }
+                    if (c.size >= 2) {
+                        val duration = if (c.size >= 3) c[2].toLong() else 1500L
+                        service.performLongPress(c[0], c[1], duration)
+                    }
+                }
                 "SWIPE" -> {
                     val c = args.split(",").map { it.trim().toFloat() }
                     if (c.size == 4) service.performSwipe(c[0], c[1], c[2], c[3])
@@ -380,7 +387,7 @@ class AgentOrchestrator(
                 ImageContentBlock(base64 = bitmapToDataUrl(screenshot)),
                 TextContentBlock(text = "Screen text: $screenText\n\nUser: $userCommand\n\n" +
                     "Analyze: simple? Use [ACTION:...]. Complex? Use [SUBTASKS]...[/SUBTASKS].\n" +
-                    "Actions: TAP x,y | SWIPE x1,y1,x2,y2 | TYPE text | CLICK text | BACK | HOME | RECENTS | OPEN app | SEARCH query | SCRAPE url | SCREENSHOT | WAIT ms")
+                    "Actions: TAP x,y | LONGPRESS x,y | SWIPE x1,y1,x2,y2 | TYPE text | CLICK text | BACK | HOME | RECENTS | OPEN app | SEARCH query | SCRAPE url | SCREENSHOT | WAIT ms")
             )))
         } else {
             msgs.add(ChatMessage(role = "user", content = "Screen: $screenText\n\nUser: $userCommand\n\n" +
@@ -408,10 +415,10 @@ class AgentOrchestrator(
     companion object {
         private const val TAG = "AgentOrchestrator"
         private const val SYSTEM_PROMPT = "You are AutoPilot AI, a phone automation agent. You see screenshots and control the screen.\n\n" +
-            "Actions: [ACTION:TAP x,y] [ACTION:SWIPE x1,y1,x2,y2] [ACTION:TYPE text] [ACTION:CLICK text] " +
+            "Actions: [ACTION:TAP x,y] [ACTION:LONGPRESS x,y] [ACTION:SWIPE x1,y1,x2,y2] [ACTION:TYPE text] [ACTION:CLICK text] " +
             "[ACTION:BACK] [ACTION:HOME] [ACTION:RECENTS] [ACTION:OPEN app] [ACTION:SEARCH query] " +
             "[ACTION:SCRAPE url] [ACTION:SCREENSHOT] [ACTION:WAIT ms]\n\n" +
-            "Rules: Use CLICK over TAP when text visible. Use SCREENSHOT if unsure. " +
+            "Rules: Use CLICK over TAP when text visible. Use LONGPRESS for long-touch actions (e.g. copy-paste menus, drag). Use SCREENSHOT if unsure. " +
             "Complex tasks: [SUBTASKS]\\n1. task\\n[/SUBTASKS]. Done: [DONE] + summary."
     }
 }

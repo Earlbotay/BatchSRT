@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.autopilot.ai.App
 import com.autopilot.ai.data.model.ConversationMessage
+import com.autopilot.ai.service.FloatingOverlayService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,6 +35,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val text = _inputText.value.trim()
         if (text.isEmpty()) return
         _inputText.value = ""
+        // Auto-start floating overlay bubble
+        FloatingOverlayService.ensureRunning(app)
         viewModelScope.launch {
             orchestrator.processCommand(text)
         }

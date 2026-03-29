@@ -137,6 +137,16 @@ class AutoPilotAccessibilityService : AccessibilityService() {
         return null
     }
 
+    fun performLongPress(x: Float, y: Float, durationMs: Long = 1500) {
+        val path = Path()
+        path.moveTo(x, y)
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        dispatchGesture(gesture, null, null)
+        Log.d(TAG, "Long press at ($x, $y) for ${durationMs}ms")
+    }
+
     fun performBack() {
         performGlobalAction(GLOBAL_ACTION_BACK)
     }
