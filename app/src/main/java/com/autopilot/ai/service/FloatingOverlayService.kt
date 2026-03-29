@@ -1,5 +1,6 @@
 package com.autopilot.ai.service
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -7,18 +8,22 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import android.text.InputType
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewOutlineProvider
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -28,7 +33,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.core.app.NotificationCompat
 import com.autopilot.ai.App
 import com.autopilot.ai.MainActivity
 import com.autopilot.ai.R
@@ -41,182 +45,267 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
+/**
+ * Floating overlay widget service modeled after ZeroTap's FloatingWidgetService.
+ *
+ * Communication via intent actions:
+ * - ACTION_SHOW:  Show collapsed bubble
+ * - ACTION_HIDE:  Hide bubble + panel
+ * - ACTION_STOP:  Stop service entirely
+ *
+ * The bubble auto-appears when the user leaves the app (triggered by App lifecycle).
+ * The bubble auto-hides when the user enters the app.
+ */
 class FloatingOverlayService : Service() {
 
     companion object {
+        private const val TAG = "FloatingOverlay"
         const val CHANNEL_ID = "autopilot_overlay"
         const val NOTIFICATION_ID = 1002
 
+        const val ACTION_SHOW = "com.autopilot.ai.widget.SHOW"
+        const val ACTION_HIDE = "com.autopilot.ai.widget.HIDE"
+        const val ACTION_STOP = "com.autopilot.ai.widget.STOP"
+
         @Volatile
-        var instance: FloatingOverlayService? = null
-            private set
+        private var serviceInstance: FloatingOverlayService? = null
 
-        /** Auto-start the overlay if permission is granted and not already running. */
-        fun ensureRunning(context: Context) {
-            if (instance != null) return
+        /** Show the floating bubble. Starts the service if not running. */
+        fun show(context: Context) {
             if (!Settings.canDrawOverlays(context)) return
-            context.startForegroundService(
-                Intent(context, FloatingOverlayService::class.java)
-            )
+            val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = ACTION_SHOW
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
 
-        /** Hide bubble + panel — called when AutoPilot app is in foreground. */
+        /** Hide the bubble (but keep service alive). */
+        fun hide(context: Context) {
+            val svc = serviceInstance ?: return
+            val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = ACTION_HIDE
+            }
+            context.startService(intent)
+        }
+
+        /** Convenience: hide using application context from App instance. */
         fun hide() {
-            instance?.let { svc ->
-                svc.bubbleView?.visibility = View.GONE
-                if (svc.isPanelShowing) svc.removePanel()
-            }
+            val svc = serviceInstance ?: return
+            svc.hideBubbleAndPanel()
         }
 
-        /** Show bubble — called when AutoPilot app goes to background. */
+        /** Convenience: show using application context from App instance. */
         fun show() {
-            instance?.let { svc ->
-                if (!svc.isPanelShowing) {
-                    svc.bubbleView?.visibility = View.VISIBLE
-                }
+            val svc = serviceInstance
+            if (svc != null) {
+                svc.showBubble()
             }
+            // If service isn't running, App will call show(context) instead
+        }
+
+        /** Stop the entire service. */
+        fun stop(context: Context) {
+            val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = ACTION_STOP
+            }
+            context.startService(intent)
         }
     }
 
     private lateinit var windowManager: WindowManager
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var messagesJob: Job? = null
+
+    // Views
     private var bubbleView: View? = null
     private var panelView: View? = null
-    private var isPanelShowing = false
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var panelJobs: Job? = null
-    private var messagesContainer: LinearLayout? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+    private var panelParams: WindowManager.LayoutParams? = null
+
+    // State
+    private var isPanelOpen = false
     private var lastMessageCount = 0
+
+    // Panel children (to update chat)
+    private var chatContainer: LinearLayout? = null
+    private var chatScrollView: ScrollView? = null
+    private var inputField: EditText? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
+        serviceInstance = this
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-
         createNotificationChannel()
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("AutoPilot AI")
-            .setContentText("Bubble active — tap to chat from anywhere")
-            .setSmallIcon(R.drawable.ic_notification)
-            .setOngoing(true)
-            .setContentIntent(
-                PendingIntent.getActivity(
-                    this, 0,
-                    Intent(this, MainActivity::class.java),
-                    PendingIntent.FLAG_IMMUTABLE
-                )
-            )
-            .build()
-        startForeground(
-            NOTIFICATION_ID, notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-        )
+        startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        Log.i(TAG, "Service created")
+    }
 
-        createBubble()
-
-        // If the app is currently in foreground, hide the bubble immediately
-        val app = application as? App
-        if (app?.isAppInForeground == true) {
-            bubbleView?.visibility = View.GONE
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_SHOW -> showBubble()
+            ACTION_HIDE -> hideBubbleAndPanel()
+            ACTION_STOP -> {
+                hideBubbleAndPanel()
+                stopSelf()
+            }
+            else -> showBubble()  // Default: show
         }
+        return START_STICKY
     }
 
     override fun onDestroy() {
-        instance = null
-        panelJobs?.cancel()
-        serviceScope.cancel()
-        removePanel()
-        removeBubble()
         super.onDestroy()
+        messagesJob?.cancel()
+        scope.cancel()
+        removeBubble()
+        removePanel()
+        serviceInstance = null
+        Log.i(TAG, "Service destroyed")
     }
+
+    /* ════════════════════════════════════════════════════════
+     *  NOTIFICATION
+     * ════════════════════════════════════════════════════════ */
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
-            CHANNEL_ID, "AutoPilot Overlay", NotificationManager.IMPORTANCE_LOW
-        ).apply { description = "Active when the floating bubble is running" }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            CHANNEL_ID, "AutoPilot Overlay",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Floating AI assistant overlay"
+            setShowBadge(false)
+        }
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(channel)
     }
 
-    /* ───── helpers ───── */
-
-    private fun dp(dp: Int): Int =
-        TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP, dp.toFloat(), resources.displayMetrics
-        ).toInt()
-
-    private fun roundRect(
-        color: String, radius: Int, strokeColor: String? = null
-    ): GradientDrawable =
-        GradientDrawable().apply {
-            cornerRadius = dp(radius).toFloat()
-            setColor(Color.parseColor(color))
-            if (strokeColor != null) setStroke(dp(1), Color.parseColor(strokeColor))
+    private fun buildNotification(): Notification {
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
+        val pi = PendingIntent.getActivity(
+            this, 0, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("AutoPilot AI")
+            .setContentText("Floating assistant active")
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .build()
+    }
 
-    /* ════════════════════  BUBBLE  ════════════════════ */
+    /* ════════════════════════════════════════════════════════
+     *  BUBBLE VIEW
+     * ════════════════════════════════════════════════════════ */
+
+    private fun showBubble() {
+        if (bubbleView != null) {
+            bubbleView?.visibility = View.VISIBLE
+            return
+        }
+        createBubble()
+        startMessageObserver()
+    }
+
+    private fun hideBubbleAndPanel() {
+        bubbleView?.visibility = View.GONE
+        closePanel()
+    }
 
     private fun createBubble() {
-        val size = dp(56)
+        val size = dpToPx(56)
 
-        val bubble = FrameLayout(this).apply {
-            outlineProvider = ViewOutlineProvider.BACKGROUND
-            clipToOutline = true
-            background = GradientDrawable().apply {
+        // Outer circle with border
+        val container = FrameLayout(this).apply {
+            val bg = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(Color.WHITE)
-                setStroke(dp(2), Color.parseColor("#1A7A6D"))
+                setStroke(dpToPx(2), Color.parseColor("#00897B"))
             }
-            elevation = dp(8).toFloat()
+            background = bg
+            elevation = dpToPx(6).toFloat()
         }
 
-        val imageView = ImageView(this).apply {
-            setImageResource(R.drawable.ic_logo)
+        // Logo icon
+        val icon = ImageView(this).apply {
+            try {
+                val bmp = assets.open("logo.png").use { BitmapFactory.decodeStream(it) }
+                setImageBitmap(bmp)
+            } catch (_: Exception) {
+                // Fallback: colored circle with text
+                setImageDrawable(GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#00897B"))
+                })
+            }
             scaleType = ImageView.ScaleType.CENTER_CROP
-            setPadding(dp(3), dp(3), dp(3), dp(3))
+            val pad = dpToPx(8)
+            setPadding(pad, pad, pad, pad)
         }
-        bubble.addView(
-            imageView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
+        container.addView(icon, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
 
         val params = WindowManager.LayoutParams(
             size, size,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = resources.displayMetrics.widthPixels - size - dp(16)
-            y = dp(200)
+            x = dpToPx(8)
+            y = dpToPx(200)
         }
 
-        /* drag + tap */
-        var ix = 0; var iy = 0; var tx = 0f; var ty = 0f; var drag = false
-        bubble.setOnTouchListener { _, ev ->
-            when (ev.action) {
+        // Touch: drag + click
+        var initialX = 0; var initialY = 0
+        var initialTouchX = 0f; var initialTouchY = 0f
+        var isDragging = false
+
+        container.setOnTouchListener { _, event ->
+            when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    ix = params.x; iy = params.y; tx = ev.rawX; ty = ev.rawY; drag = false; true
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    isDragging = false
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = ev.rawX - tx; val dy = ev.rawY - ty
-                    if (dx * dx + dy * dy > 100) drag = true
-                    params.x = ix + dx.toInt(); params.y = iy + dy.toInt()
-                    try { windowManager.updateViewLayout(bubble, params) } catch (_: Exception) {}
+                    val dx = event.rawX - initialTouchX
+                    val dy = event.rawY - initialTouchY
+                    if (dx * dx + dy * dy > 100) isDragging = true
+                    params.x = initialX + dx.toInt()
+                    params.y = initialY + dy.toInt()
+                    try { windowManager.updateViewLayout(container, params) } catch (_: Exception) {}
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!drag) togglePanel(); true
+                    if (!isDragging) togglePanel()
+                    true
                 }
                 else -> false
             }
         }
 
-        windowManager.addView(bubble, params)
-        bubbleView = bubble
+        try {
+            windowManager.addView(container, params)
+            bubbleView = container
+            bubbleParams = params
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to add bubble", e)
+        }
     }
 
     private fun removeBubble() {
@@ -224,298 +313,284 @@ class FloatingOverlayService : Service() {
             try { windowManager.removeView(it) } catch (_: Exception) {}
         }
         bubbleView = null
+        bubbleParams = null
     }
 
-    /* ════════════════════  CHAT PANEL  ════════════════════ */
+    /* ════════════════════════════════════════════════════════
+     *  CHAT PANEL
+     * ════════════════════════════════════════════════════════ */
 
     private fun togglePanel() {
-        if (isPanelShowing) removePanel() else showPanel()
+        if (isPanelOpen) closePanel() else openPanel()
     }
 
-    @Suppress("SetTextI18n")
-    private fun showPanel() {
-        if (isPanelShowing) return
-        isPanelShowing = true
-        bubbleView?.visibility = View.GONE
-
-        val app = application as App
-        val orchestrator = app.orchestrator
-        val screenWidth = resources.displayMetrics.widthPixels
-        val panelWidth = screenWidth - dp(24)
-
-        /* ── card container ── */
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = roundRect("#FFFBFE", 20, "#C0C0C0")
-            elevation = dp(16).toFloat()
+    private fun openPanel() {
+        if (panelView != null) {
+            panelView?.visibility = View.VISIBLE
+            isPanelOpen = true
+            refreshChat()
+            return
         }
-
-        /* ── title bar ── */
-        val titleBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(10), dp(8), dp(10))
-            setBackgroundColor(Color.parseColor("#F5F0EB"))
-        }
-
-        val logoImg = ImageView(this).apply {
-            setImageResource(R.drawable.ic_logo)
-            scaleType = ImageView.ScaleType.CENTER_CROP
-        }
-        titleBar.addView(
-            logoImg,
-            LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) }
-        )
-
-        titleBar.addView(
-            TextView(this).apply {
-                text = "AutoPilot AI"
-                setTextColor(Color.parseColor("#1C1B1F"))
-                textSize = 16f
-                setTypeface(null, Typeface.BOLD)
-            },
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
-
-        val clearBtn = TextView(this).apply {
-            text = "🗑"
-            textSize = 18f
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            setOnClickListener { orchestrator.clearMessages() }
-        }
-        titleBar.addView(clearBtn)
-
-        titleBar.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 20f
-            setTextColor(Color.parseColor("#666666"))
-            setPadding(dp(8), dp(4), dp(4), dp(4))
-            setOnClickListener { removePanel() }
-        })
-        card.addView(titleBar)
-
-        /* ── divider ── */
-        card.addView(View(this).apply {
-            setBackgroundColor(Color.parseColor("#E0E0E0"))
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
-
-        /* ── messages area ── */
-        val messagesScroll = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(360)
-            )
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            isVerticalScrollBarEnabled = true
-            setBackgroundColor(Color.parseColor("#FFFAF5"))
-        }
-        val messagesLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        messagesScroll.addView(messagesLayout)
-        card.addView(messagesScroll)
-        messagesContainer = messagesLayout
-
-        /* ── status bar ── */
-        val statusTv = TextView(this).apply {
-            text = ""
-            setTextColor(Color.parseColor("#1A7A6D"))
-            textSize = 11f
-            setPadding(dp(12), dp(4), dp(12), dp(4))
-            visibility = View.GONE
-        }
-        card.addView(statusTv)
-
-        /* ── divider ── */
-        card.addView(View(this).apply {
-            setBackgroundColor(Color.parseColor("#E0E0E0"))
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
-
-        /* ── input row ── */
-        val inputRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(10))
-            setBackgroundColor(Color.parseColor("#FFFBFE"))
-        }
-        val editText = EditText(this).apply {
-            hint = "Tell me what to do..."
-            setHintTextColor(Color.parseColor("#999999"))
-            setTextColor(Color.parseColor("#1C1B1F"))
-            textSize = 14f
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            maxLines = 3
-            background = roundRect("#F0F0F0", 24, "#CCCCCC")
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            imeOptions = EditorInfo.IME_ACTION_SEND
-        }
-        inputRow.addView(
-            editText,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
-
-        val sendBtn = TextView(this).apply {
-            text = "➤"
-            textSize = 24f
-            setTextColor(Color.parseColor("#1A7A6D"))
-            setPadding(dp(12), dp(6), dp(4), dp(6))
-        }
-        inputRow.addView(sendBtn)
-        card.addView(inputRow)
-
-        /* ── observe messages & running state ── */
-        lastMessageCount = 0
-        panelJobs?.cancel()
-        panelJobs = serviceScope.launch {
-            launch {
-                orchestrator.messages.collectLatest { msgs ->
-                    updateMessages(messagesLayout, messagesScroll, msgs)
-                }
-            }
-            launch {
-                orchestrator.isRunning.collectLatest { running ->
-                    if (running) {
-                        statusTv.text = "⏳ Working..."
-                        statusTv.visibility = View.VISIBLE
-                        editText.isEnabled = false
-                        sendBtn.isEnabled = false
-                    } else {
-                        statusTv.visibility = View.GONE
-                        editText.isEnabled = true
-                        sendBtn.isEnabled = true
-                    }
-                }
-            }
-        }
-
-        /* ── send logic ── */
-        val doSend: () -> Unit = send@{
-            val text = editText.text.toString().trim()
-            if (text.isEmpty()) return@send
-            if (orchestrator.isRunning.value) return@send
-
-            editText.setText("")
-            serviceScope.launch {
-                orchestrator.processCommand(text)
-            }
-        }
-
-        sendBtn.setOnClickListener { doSend() }
-        editText.setOnEditorActionListener { _, id, _ ->
-            if (id == EditorInfo.IME_ACTION_SEND) {
-                doSend(); true
-            } else false
-        }
-
-        /* ── add to window ── */
-        val wParams = WindowManager.LayoutParams(
-            panelWidth,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            0,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = dp(60)
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
-        }
-
-        windowManager.addView(card, wParams)
-        panelView = card
-
-        editText.requestFocus()
-        editText.postDelayed({
-            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(editText, InputMethodManager.SHOW_IMPLICIT)
-        }, 250)
+        createPanel()
+        isPanelOpen = true
+        refreshChat()
     }
 
-    /* ── message list management ── */
-
-    private fun updateMessages(
-        container: LinearLayout, scroll: ScrollView, messages: List<ConversationMessage>
-    ) {
-        if (messages.size < lastMessageCount) {
-            container.removeAllViews()
-            lastMessageCount = 0
-        }
-
-        for (i in lastMessageCount until messages.size) {
-            container.addView(createMessageView(messages[i]))
-        }
-        lastMessageCount = messages.size
-
-        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
-    }
-
-    private fun createMessageView(msg: ConversationMessage): View {
-        val isUser = msg.role == "user"
-        val isSystem = msg.role == "system"
-
-        val wrapper = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(3), 0, dp(3))
-            gravity = if (isUser) Gravity.END else Gravity.START
-        }
-
-        if (msg.isSubAgent) {
-            wrapper.addView(TextView(this).apply {
-                text = "🤖 SubAgent #${msg.subAgentId}"
-                textSize = 10f
-                setTextColor(Color.parseColor("#FF9800"))
-                setTypeface(null, Typeface.BOLD)
-                setPadding(dp(4), 0, dp(4), dp(2))
-            })
-        }
-
-        val bubble = TextView(this).apply {
-            text = msg.content
-            textSize = 13f
-            lineHeight = dp(18)
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            maxWidth = (resources.displayMetrics.widthPixels * 0.65).toInt()
-
-            when {
-                isUser -> {
-                    background = roundRect("#6B4C3B", 16)
-                    setTextColor(Color.WHITE)
-                }
-                isSystem -> {
-                    background = roundRect("#F0F0F0", 16)
-                    setTextColor(Color.parseColor("#666666"))
-                    textSize = 11f
-                }
-                msg.isSubAgent -> {
-                    background = roundRect("#FFF3E0", 16, "#FFE0B2")
-                    setTextColor(Color.parseColor("#1C1B1F"))
-                }
-                else -> {
-                    background = roundRect("#F5E6DC", 16)
-                    setTextColor(Color.parseColor("#1C1B1F"))
-                }
-            }
-        }
-
-        val bubbleParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = if (isUser) Gravity.END else Gravity.START
-        }
-
-        wrapper.addView(bubble, bubbleParams)
-        return wrapper
+    private fun closePanel() {
+        panelView?.visibility = View.GONE
+        isPanelOpen = false
     }
 
     private fun removePanel() {
-        panelJobs?.cancel()
-        panelJobs = null
-        messagesContainer = null
-        lastMessageCount = 0
         panelView?.let {
             try { windowManager.removeView(it) } catch (_: Exception) {}
         }
         panelView = null
-        isPanelShowing = false
-        bubbleView?.visibility = View.VISIBLE
+        chatContainer = null
+        chatScrollView = null
+        inputField = null
+    }
+
+    private fun createPanel() {
+        val dm = resources.displayMetrics
+        val panelWidth = (dm.widthPixels * 0.88).toInt()
+        val panelHeight = (dm.heightPixels * 0.65).toInt()
+
+        // Main container
+        val main = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(16).toFloat()
+                setColor(Color.parseColor("#1E1E2E"))
+                setStroke(dpToPx(1), Color.parseColor("#333355"))
+            }
+            background = bg
+            elevation = dpToPx(10).toFloat()
+            clipToOutline = true
+            outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+        }
+
+        // Header
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(12), dpToPx(10), dpToPx(12), dpToPx(10))
+            setBackgroundColor(Color.parseColor("#2A2A3E"))
+        }
+
+        val title = TextView(this).apply {
+            text = "AutoPilot AI"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            typeface = Typeface.DEFAULT_BOLD
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val clearBtn = TextView(this).apply {
+            text = "🗑"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            setPadding(dpToPx(8), 0, dpToPx(8), 0)
+            setOnClickListener {
+                val app = applicationContext as App
+                app.orchestrator.clearMessages()
+                chatContainer?.removeAllViews()
+            }
+        }
+
+        val closeBtn = TextView(this).apply {
+            text = "✕"
+            setTextColor(Color.parseColor("#FF6B6B"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dpToPx(8), 0, dpToPx(4), 0)
+            setOnClickListener { closePanel() }
+        }
+
+        header.addView(title)
+        header.addView(clearBtn)
+        header.addView(closeBtn)
+        main.addView(header, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        // Chat scroll area
+        val scroll = ScrollView(this).apply {
+            setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
+            isFillViewport = true
+        }
+        val chatLL = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scroll.addView(chatLL, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        main.addView(scroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+        chatContainer = chatLL
+        chatScrollView = scroll
+
+        // Input bar
+        val inputBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(8), dpToPx(6), dpToPx(8), dpToPx(6))
+            setBackgroundColor(Color.parseColor("#2A2A3E"))
+        }
+
+        val input = EditText(this).apply {
+            hint = "Tell me what to do..."
+            setHintTextColor(Color.parseColor("#666688"))
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            maxLines = 3
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(20).toFloat()
+                setColor(Color.parseColor("#333355"))
+            }
+            background = bg
+            setPadding(dpToPx(14), dpToPx(8), dpToPx(14), dpToPx(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val sendBtn = TextView(this).apply {
+            text = "▶"
+            setTextColor(Color.parseColor("#00897B"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+            setPadding(dpToPx(10), 0, dpToPx(4), 0)
+        }
+
+        val sendAction = {
+            val text = input.text?.toString()?.trim().orEmpty()
+            if (text.isNotEmpty()) {
+                input.setText("")
+                hideKeyboard(input)
+                val app = applicationContext as App
+                scope.launch {
+                    app.orchestrator.processCommand(text)
+                }
+            }
+        }
+
+        sendBtn.setOnClickListener { sendAction() }
+        input.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) { sendAction(); true } else false
+        }
+
+        inputBar.addView(input)
+        inputBar.addView(sendBtn)
+        main.addView(inputBar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        inputField = input
+
+        // Window params — focusable so keyboard works
+        val params = WindowManager.LayoutParams(
+            panelWidth, panelHeight,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.CENTER
+        }
+
+        try {
+            windowManager.addView(main, params)
+            panelView = main
+            panelParams = params
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to add panel", e)
+        }
+    }
+
+    /* ════════════════════════════════════════════════════════
+     *  CHAT RENDERING
+     * ════════════════════════════════════════════════════════ */
+
+    private fun startMessageObserver() {
+        messagesJob?.cancel()
+        val app = applicationContext as App
+        messagesJob = scope.launch {
+            app.orchestrator.messages.collectLatest { msgs ->
+                if (isPanelOpen && msgs.size != lastMessageCount) {
+                    lastMessageCount = msgs.size
+                    refreshChat()
+                }
+            }
+        }
+    }
+
+    private fun refreshChat() {
+        val container = chatContainer ?: return
+        val app = applicationContext as App
+        val msgs = app.orchestrator.messages.value
+
+        container.removeAllViews()
+        for (msg in msgs) {
+            container.addView(createMessageBubble(msg))
+        }
+
+        chatScrollView?.post {
+            chatScrollView?.fullScroll(View.FOCUS_DOWN)
+        }
+    }
+
+    private fun createMessageBubble(msg: ConversationMessage): View {
+        val isUser = msg.role == "user"
+        val isSystem = msg.role == "system"
+
+        val bubble = TextView(this).apply {
+            text = if (msg.isSubAgent) "🤖 SubAgent #${msg.subAgentId}: ${msg.content}" else msg.content
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(dpToPx(10), dpToPx(6), dpToPx(10), dpToPx(6))
+            maxLines = 50
+
+            val bgColor = when {
+                isUser -> Color.parseColor("#00897B")
+                isSystem -> Color.parseColor("#333355")
+                msg.isSubAgent -> Color.parseColor("#4A3500")
+                else -> Color.parseColor("#3A3A5E")
+            }
+            setTextColor(if (isUser) Color.WHITE else Color.parseColor("#E0E0F0"))
+
+            val bg = GradientDrawable().apply {
+                cornerRadius = dpToPx(12).toFloat()
+                setColor(bgColor)
+            }
+            background = bg
+        }
+
+        val wrapper = FrameLayout(this).apply {
+            val lp = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = if (isUser) Gravity.END else Gravity.START
+                setMargins(dpToPx(4), dpToPx(3), dpToPx(4), dpToPx(3))
+                width = dpToPx(260).coerceAtMost(
+                    (resources.displayMetrics.widthPixels * 0.7).toInt()
+                )
+            }
+            addView(bubble, lp)
+        }
+        return wrapper
+    }
+
+    /* ════════════════════════════════════════════════════════
+     *  UTIL
+     * ════════════════════════════════════════════════════════ */
+
+    private fun hideKeyboard(view: View) {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(view.windowToken, 0)
+    }
+
+    private fun dpToPx(dp: Int): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP, dp.toFloat(), resources.displayMetrics
+        ).toInt()
     }
 }

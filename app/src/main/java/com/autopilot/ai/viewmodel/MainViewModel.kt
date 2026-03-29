@@ -4,54 +4,48 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.autopilot.ai.App
+import com.autopilot.ai.data.db.ApiKeyEntity
+import com.autopilot.ai.data.model.AgentTask
 import com.autopilot.ai.data.model.ConversationMessage
-import com.autopilot.ai.service.FloatingOverlayService
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as App
+    private val orchestrator = app.orchestrator
     private val repository = app.repository
-    val orchestrator = app.orchestrator
 
-    val activeKeys = repository.activeKeys
-    val isolatedKeys = repository.isolatedKeys
-    val allKeys = repository.allKeys
-
+    // ── Chat state (from orchestrator) ──
     val messages: StateFlow<List<ConversationMessage>> = orchestrator.messages
-    val isRunning = orchestrator.isRunning
-    val currentTasks = orchestrator.currentTasks
+    val isRunning: StateFlow<Boolean> = orchestrator.isRunning
+    val inputText: StateFlow<String> = orchestrator.inputText
+    val currentTasks: StateFlow<List<AgentTask>> = orchestrator.currentTasks
 
-    private val _inputText = MutableStateFlow("")
-    val inputText: StateFlow<String> = _inputText.asStateFlow()
-
-    fun updateInput(text: String) {
-        _inputText.value = text
-    }
+    fun setInputText(text: String) = orchestrator.setInputText(text)
 
     fun sendCommand() {
-        val text = _inputText.value.trim()
+        val text = inputText.value.trim()
         if (text.isEmpty()) return
-        _inputText.value = ""
-        // Auto-start floating overlay bubble
-        FloatingOverlayService.ensureRunning(app)
-        viewModelScope.launch {
-            orchestrator.processCommand(text)
-        }
+
+        // Enable overlay on first message
+        app.enableOverlay()
+
+        orchestrator.processCommand(text)
     }
 
-    fun stopExecution() {
-        orchestrator.requestStop()
-    }
+    fun stopExecution() = orchestrator.stopExecution()
+    fun clearMessages() = orchestrator.clearMessages()
 
-    fun clearChat() {
-        orchestrator.clearMessages()
-    }
+    // ── API Key management ──
+    val allKeys: Flow<List<ApiKeyEntity>> = repository.allKeys
+    val activeKeys: Flow<List<ApiKeyEntity>> = repository.activeKeys
+    val isolatedKeys: Flow<List<ApiKeyEntity>> = repository.isolatedKeys
 
+    /** Add multiple keys from multiline text (one key per line). */
     fun addApiKeys(keysText: String) {
         val keys = keysText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (keys.isEmpty()) return
         viewModelScope.launch {
             repository.addKeys(keys)
         }
@@ -60,12 +54,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteApiKey(keyId: Int) {
         viewModelScope.launch {
             repository.deleteKey(keyId)
-        }
-    }
-
-    fun restoreMonthlyKeys() {
-        viewModelScope.launch {
-            repository.restoreMonthlyKeys()
         }
     }
 }

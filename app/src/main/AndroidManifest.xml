@@ -31,6 +31,7 @@
             </intent-filter>
         </activity>
 
+        <!-- Accessibility Service — same flags as ZeroTap -->
         <service
             android:name=".service.AutoPilotAccessibilityService"
             android:exported="false"
@@ -43,15 +44,25 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- Background foreground service -->
         <service
             android:name=".service.AutoPilotForegroundService"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Background AI agent processing and task execution" />
+        </service>
 
+        <!-- Floating overlay widget — ZeroTap pattern -->
         <service
             android:name=".service.FloatingOverlayService"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Persistent floating overlay widget that assists the user while they interact with other apps" />
+        </service>
 
     </application>
 </manifest>
